@@ -570,7 +570,7 @@ static int optical_duplicate(bam1_t *ori, bam1_t *dup, int max_dist) {
 }
 
 
-static int mark_duplicates(md_param_t *param, khash_t(duplicates) *dup_hash, bam1_t *ori, bam1_t *dup) {
+static int mark_duplicates(md_param_t *param, khash_t(duplicates) *dup_hash, bam1_t *ori, bam1_t *dup, int *optical) {
     char dup_type = 0;
 
     dup->core.flag |= BAM_FDUP;
@@ -586,6 +586,10 @@ static int mark_duplicates(md_param_t *param, khash_t(duplicates) *dup_hash, bam
         if (optical_duplicate(ori, dup, param->opt_dist)) {
             bam_aux_append(dup, "dt", 'Z', 3, "SQ");
             dup_type = 'O';
+            (*optical)++;
+        } else {
+            // not an optical duplicate
+            bam_aux_append(dup, "dt", 'Z', 3, "LB");
         }
     }
 
@@ -627,6 +631,7 @@ static int bam_mark_duplicates(md_param_t *param) {
     read_queue_t *in_read;
     int ret;
     int reading, writing, excluded, duplicate, single, pair, single_dup, examined, optical;
+    int np_duplicate, np_opt_duplicate;
     tmp_file_t temp;
 
     if (!pair_hash || !single_hash || !read_buffer || !dup_hash) {
@@ -684,6 +689,7 @@ static int bam_mark_duplicates(md_param_t *param) {
     }
 
     reading = writing = excluded = single_dup = duplicate = examined = pair = single = optical = 0;
+    np_duplicate = np_opt_duplicate = 0;
 
     while ((ret = sam_read1(param->in, header, in_read->b)) >= 0) {
 
@@ -743,7 +749,7 @@ static int bam_mark_duplicates(md_param_t *param) {
 
                         bp->p = in_read->b;
                         
-                        if (mark_duplicates(param, dup_hash, bp->p, dup))
+                        if (mark_duplicates(param, dup_hash, bp->p, dup, &optical))
                             goto fail;
                             
                         single_dup++;
@@ -800,7 +806,7 @@ static int bam_mark_duplicates(md_param_t *param) {
                         dup = in_read->b;
                     }
                     
-                    if (mark_duplicates(param, dup_hash, bp->p, dup))
+                    if (mark_duplicates(param, dup_hash, bp->p, dup, &optical))
                         goto fail;
  
                     duplicate++;
@@ -830,7 +836,7 @@ static int bam_mark_duplicates(md_param_t *param) {
                     if ((bp->p->core.flag & BAM_FPAIRED) && !(bp->p->core.flag & BAM_FMUNMAP)) {
                         // if matched against one of a pair just mark as duplicate
                         
-                        if (mark_duplicates(param, dup_hash, bp->p, in_read->b))
+                        if (mark_duplicates(param, dup_hash, bp->p, in_read->b, &optical))
                             goto fail;
 
                     } else {
@@ -849,7 +855,7 @@ static int bam_mark_duplicates(md_param_t *param) {
                             dup = in_read->b;
                         }
                         
-                        if (mark_duplicates(param, dup_hash, bp->p, dup))
+                        if (mark_duplicates(param, dup_hash, bp->p, dup, &optical))
                             goto fail;
                        
                     }
@@ -972,11 +978,12 @@ static int bam_mark_duplicates(md_param_t *param) {
 
         while ((ret = tmp_file_read(&temp, b)) > 0) {
 
-            if ((b->core.flag & BAM_FSUPPLEMENTARY) || (b->core.flag & BAM_FUNMAP)) {
+            if ((b->core.flag & BAM_FSUPPLEMENTARY) || (b->core.flag & BAM_FUNMAP) || (b->core.flag & BAM_FSECONDARY)) {
                 k = kh_get(duplicates, dup_hash, bam_get_qname(b));
 
                 if (k != kh_end(dup_hash)) {
                     b->core.flag  |= BAM_FDUP;
+                    np_duplicate++;
                     
                     if (param->tag && kh_val(dup_hash, k).name) {
                         if (bam_aux_append(b, "do", 'Z', strlen(kh_val(dup_hash, k).name) + 1, (uint8_t*)kh_val(dup_hash, k).name)) {
@@ -985,8 +992,13 @@ static int bam_mark_duplicates(md_param_t *param) {
                         }
                     }
                     
-                    if (param->opt_dist && kh_val(dup_hash, k).type) {
-                        bam_aux_append(b, "dt", 'Z', 3, "SQ");
+                    if (param->opt_dist) {
+                        if (kh_val(dup_hash, k).type) {
+                            bam_aux_append(b, "dt", 'Z', 3, "SQ");
+                            np_opt_duplicate++;
+                        } else {
+                            bam_aux_append(b, "dt", 'Z', 3, "LB");
+                        }
                     }
                 }
             }
@@ -1040,8 +1052,13 @@ static int bam_mark_duplicates(md_param_t *param) {
                 "SINGLE: %d\n"
                 "DUPLICATE PAIR: %d\n" 
                 "DUPLICATE SINGLE: %d\n"
+                "DUPLICATE OPTICAL: %d\n"
+                "DUPLICATE NON PRIMARY: %d\n"
+                "DUPLICATE NON PRIMARY OPTICAL: %d\n"
+                "DUPLICATE PRIMARY TOTAL: %d\n"
                 "DUPLICATE TOTAL: %d\n", reading, writing, excluded, examined, pair, single,
-                                duplicate, single_dup, single_dup + duplicate);
+                                duplicate, single_dup, optical, np_duplicate, np_opt_duplicate,
+                                single_dup + duplicate, single_dup + duplicate + np_duplicate);
                                 
         if (file_open) {
             fclose(fp);
@@ -1133,6 +1150,7 @@ int bam_markdup(int argc, char **argv) {
         return markdup_usage();
         
     if (param.opt_dist < 0) param.opt_dist = 0;
+    if (param.max_length < 0) param.max_length = 300;
 
     param.in = sam_open_format(argv[optind], "r", &ga.in);
 
