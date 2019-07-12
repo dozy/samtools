@@ -717,6 +717,7 @@ static int bam_mark_duplicates(md_param_t *param, char *arg_list) {
     int reading, writing, excluded, duplicate, single, pair, single_dup, examined, optical, single_optical;
     int np_duplicate, np_opt_duplicate;
     tmp_file_t temp;
+    char *idx_fn = NULL;
 
     if (!pair_hash || !single_hash || !read_buffer || !dup_hash) {
         fprintf(stderr, "[markdup] out of memory\n");
@@ -755,6 +756,10 @@ static int bam_mark_duplicates(md_param_t *param, char *arg_list) {
     if (sam_hdr_write(param->out, header) < 0) {
         fprintf(stderr, "[markdup] error writing header.\n");
         goto fail;
+    }
+    if (write_index) {
+        if (!(idx_fn = auto_index(out, out_fn, header)))
+            goto fail;
     }
 
     // used for coordinate order checks
@@ -1177,6 +1182,13 @@ static int bam_mark_duplicates(md_param_t *param, char *arg_list) {
         }
     }
 
+    if (write_index) {
+        if (sam_idx_save(out) < 0) {
+            print_error_errno("markdup", "writing index failed");
+            goto fail;
+        }
+    }
+
     kh_destroy(reads, pair_hash);
     kh_destroy(reads, single_hash);
     kl_destroy(read_queue, read_buffer);
@@ -1219,7 +1231,7 @@ static int markdup_usage(void) {
     fprintf(stderr, "  -t           Mark primary duplicates with the name of the original in a \'do\' tag."
                                   " Mainly for information and debugging.\n");
 
-    sam_global_opt_help(stderr, "-.O..@");
+    sam_global_opt_help(stderr, "-.O..@.");
 
     fprintf(stderr, "\nThe input file must be coordinate sorted and must have gone"
                      " through fixmates with the mate scoring option on.\n");
